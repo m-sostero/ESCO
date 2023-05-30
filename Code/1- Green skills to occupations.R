@@ -6,7 +6,15 @@ green_skills_collection <- read_csv("./Data/greenSkillsCollection_en.csv", col_t
   # Rename variables to clarify reference to skills (as opposed to occupations, used in other tables)
   rename("skillUri" = "conceptUri", "skillPreferredLabel" =  "preferredLabel") %>%  
   # Exclude `conceptType`, since it's the same for every record ("KnowledgeSkillCompetence")
-  select(-conceptType) 
+  select(-conceptType) %>% 
+  mutate(category = "green")
+
+digital_skills_collection <- read_csv("./Data/digitalSkillsCollection_en.csv", col_types = "c") %>% 
+  # Rename variables to clarify reference to skills (as opposed to occupations, used in other tables)
+  rename("skillUri" = "conceptUri", "skillPreferredLabel" =  "preferredLabel") %>%  
+  # Exclude `conceptType`, since it's the same for every record ("KnowledgeSkillCompetence")
+  select(-conceptType) %>% 
+  mutate(category = "digital")
 
 # Import correspondence between green skills and occupations, from ESCO
 occupation_skill_relations <- read_csv("./Data/occupationSkillRelations.csv", col_types = "c")
