@@ -1,11 +1,13 @@
 library("tidyverse")
+library("openai")
 library("lsa")
 library("ggcorrplot")
 
-# Import table of skills, with identifiers, description, and column with embeddings
-skill_table <- read_tsv("Embeddings/embedding_skills.csv", col_types = cols(definition = "c"))
+# Import table of skills, with identifiers, description,
+# Includes a column with embeddings of preferredlabel + description computed by Vesna
+esco_table <- read_tsv("Embeddings/embedding_skills.csv", col_types = cols(definition = "c"))
 
-skill_table
+esco_table
 
 # the `embeddings` variable is currently a character, but actually contains a numeric vector, to unpack
 
@@ -13,7 +15,7 @@ skill_table
 # Transform skill table into embeddings vector table ----------------------
 
 # Create table of skill embedding vectors (each skill is a column) 
-skill_embeddings <- skill_table %>%
+skill_embeddings <- esco_table %>%
   # Remove the [brackets] from the embedding variable
   mutate(embeddings = str_remove_all(embeddings, "\\[|\\]")) %>% 
   # Splits the constituent elements of each record of embedding in a separate row, treat as numeric vector
@@ -46,64 +48,107 @@ ggcorrplot(skill_similarity, lab = TRUE) +
 
 skill_similarity %>% 
   as_tibble(rownames = "skill") %>% 
-  write_csv("esco_sample_similarities.csv")
+  write_csv("Sample/esco_sample_similarities.csv")
 
 # Compute embeddings for skills and descriptions, separately ----
 
 set.seed(1234)
-esco_sample <- skill_table %>% slice_sample(n = 100) %>% 
+esco_sample <- skill_table %>%
+  slice_sample(n = 100) %>% 
   select(skill = preferredLabel, description)
 
-write_rds(esco_sample, file = "esco_sample.rds")
+write_rds(esco_sample, file = "Sample/esco_sample.rds")
 
-# Get embeddings from OpenAI API, frame them in a table, column-wise
-esco_sample_emb_skills <- create_embedding(model = "text-embedding-ada-002", input = esco_sample$skill)$data$embedding %>%
-  set_names(esco_sample$skill) %>% 
-  as_tibble()
+esco_sample <- read_rds("Sample/esco_sample.rds")
 
-write_rds(esco_sample_emb_skills, file = "esco_sample_emb_skills.rds")
 
-# Compute pairwise cosine similarity
+
+# Get text embeddings from OpenAI API ----
+
+# Define function that takes a vector string as input
+# and returns a table of embeddings (one column per string, named after the string values)
+
+esco_table$preferredLabel
+
+get_embedding_table <- function(string_vec) {
+  
+  
+  map()
+  
+  create_embedding(model = "text-embedding-ada-002", input = string_vec)$data$embedding %>%
+    set_names(string_vec) %>% 
+    as_tibble()
+}
+
+# Get embeddings for selected ESCO skills (preferredLabel)
+# esco_sample_emb_skills <- get_embedding_table(esco_sample$description)
+# write_rds(esco_sample_emb_skills, file = "Sample/esco_sample_emb_skills.rds")
+esco_sample_emb_skills <- read_rds("Sample/esco_sample_emb_skills.rds")
+
+
+# Get embeddings for selected ESCO skill descriptions
+# esco_sample_emb_desc <- get_embedding_table(esco_sample$description)
+# write_rds(esco_sample_emb_desc, file = "Sample/esco_sample_emb_desc.rds")
+esco_sample_emb_desc <- read_rds("Sample/esco_sample_emb_desc.rds")
+
+
+# Get embeddings for *all* ESCO skills (preferredLabel)
+esco_emb_skills <- get_embedding_table(esco_table$preferredLabel)
+write_rds(esco_emb_skills, file = "Embeddings/esco_sample_emb_skills.rds")
+
+
+# Compute pairwise cosine similarity between skill embeddings
 esco_sample_emb_skills %>% 
   select(1:10) %>% 
   as.matrix() %>%
   cosine() %>% 
-  ggcorrplot(lab = TRUE) +
+  ggcorrplot(lab = TRUE, hc.order = TRUE) +
   labs(
-    title = "Similarity between all skills seems to high",
+    title = "Similarity between all skills is quite high",
     subtitle = "Cosine similarity of embedding vectors between pairs of randomly-selected ESCO skills"
-    )
-
-esco_sample_emb_descriptions <- create_embedding(model = "text-embedding-ada-002", input = esco_sample$description)$data$embedding %>%
-  set_names(esco_sample$description) %>% 
-  as_tibble()
+  )
 
 
 
-find_similar <- function(skill) {
-  bind_cols(esco_sample_emb_skills[, skill], esco_sample_emb_descriptions) %>%
-    as.matrix() %>% 
-    cosine() %>% 
-    as_tibble(rownames = "compare") %>% 
-    filter(compare == names(esco_sample_emb_skills[, skill])) %>% 
-    pivot_longer(cols = -compare, names_to = "match_description", values_to = "similarity") %>% 
-    filter(match_description != compare) %>% 
-    arrange(desc(similarity)) %>% 
-    slice_head(n = 5) 
-} 
+
+# Find the closest embeddings relative to a reference ----
 
 
-esco_closest_descriptions <- esco_sample_emb_skills %>% 
-  names() %>% 
-  map_dfr(~ find_similar(.))
+cos_sim_vec <- function(A, B) {
+  return(sum(A*B, na.rm = TRUE) / sqrt(sum(A^2, na.rm = TRUE)*sum(B^2, na.rm = TRUE)))
+}
 
-# When is the closest description not the correct one? 
-esco_closest_descriptions %>% 
-  group_by(compare) %>% 
-  slice_max(similarity) %>% 
-  left_join(select(skill_table, preferredLabel, description),  by = c("compare" = "preferredLabel")) %>% 
-  filter(description != match_description) %>% 
-  select(skill = compare, `Official description` = description, `Closest description` = match_description, `Similarity` = similarity ) %>% 
+# Possibly more efficient for larger matrices
+# Matrix <- as.matrix(DF)
+# sim <- Matrix / sqrt(rowSums(Matrix * Matrix))
+# sim <- sim %*% t(sim)
+
+# Define function that, given a table of reference embedding on the LHS,
+# finds the n_closest most cosine-similar embeddings from a table in the reference table on the RHS
+find_closest_embeddings <- function(reference, comparison, n_closest = 5) {
+  map_dfr(
+    # Iterate over elements (named embedding vectors) in `reference`
+    reference, \(x)
+    # Compute distance with respect to each element (named embedding vectors) in `comparison`
+    map_dfc(comparison, \(y) cos_sim_vec(x, y)) %>% 
+      gather(key = "comparison", value = "similarity") %>%
+      # Keep the `n_closest` elements of comparisons with highest cosine similarity, rank them
+      slice_max(similarity, n = n_closest) %>% 
+      mutate(similarity_rank = row_number()),
+    .id = "reference"
+  )
+}
+
+esco_sample_closest <- find_closest_embeddings(esco_sample_emb_skills, esco_sample_emb_desc, n = 5)
+
+
+
+# When is the closest description not the correct one? ----
+
+esco_sample_closest %>% 
+  left_join(select(esco_table, preferredLabel, description),  by = c("reference" = "preferredLabel")) %>% 
+  filter(description != comparison) %>% 
+  select(skill = compare, `Official description` = description, `Closest description` = match_description, `Similarity` = similarity) %>% 
   pander(split.cell = 20)
 
 esco_closest_descriptions %>%
